@@ -26,7 +26,7 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
     IHttpClientFactory httpClientFactory,
     ILogger<Program> logger) =>
 {
-    if (!ExtensionIdRegex().IsMatch(extensionId))
+    if (!Patterns.ExtensionId().IsMatch(extensionId))
     {
         return Results.Json(
             new ErrorResponse("Invalid extension ID format. Must be 32 lowercase letters (a-p)."),
@@ -52,7 +52,7 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
         logger.LogInformation("Fetching Chrome Web Store page for extension {ExtensionId}", extensionId);
         var html = await client.GetStringAsync(storeUrl);
 
-        var version = ExtractVersion(html);
+        var version = VersionExtractor.Extract(html);
 
         if (string.IsNullOrEmpty(version))
         {
@@ -108,24 +108,32 @@ app.MapGet("/healthz", () => Results.Json(
 
 app.Run();
 
-static string? ExtractVersion(string html)
-{
-    var parts = html.Split('>');
-    foreach (var part in parts)
-    {
-        var match = VersionRegex().Match(part);
-        if (match.Success)
-            return match.Groups[1].Value;
-    }
+// --- Source-generated Regex (must be in a partial class, not top-level) ---
 
-    return null;
+internal static partial class Patterns
+{
+    [GeneratedRegex(@"^[a-p]{32}$")]
+    public static partial Regex ExtensionId();
+
+    [GeneratedRegex(@"^(\d+\.\d+\.\d+)")]
+    public static partial Regex Version();
 }
 
-[GeneratedRegex(@"^[a-p]{32}$")]
-static partial Regex ExtensionIdRegex();
+internal static class VersionExtractor
+{
+    public static string? Extract(string html)
+    {
+        var parts = html.Split('>');
+        foreach (var part in parts)
+        {
+            var match = Patterns.Version().Match(part);
+            if (match.Success)
+                return match.Groups[1].Value;
+        }
 
-[GeneratedRegex(@"^(\d+\.\d+\.\d+)")]
-static partial Regex VersionRegex();
+        return null;
+    }
+}
 
 // --- Models ---
 
