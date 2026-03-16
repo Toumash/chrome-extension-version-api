@@ -1,7 +1,8 @@
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Caching.Memory;
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateSlimBuilder(args);
 
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient("ChromeWebStore", client =>
@@ -9,6 +10,10 @@ builder.Services.AddHttpClient("ChromeWebStore", client =>
     client.DefaultRequestHeaders.UserAgent.ParseAdd(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
     client.Timeout = TimeSpan.FromSeconds(15);
+});
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonContext.Default);
 });
 
 var app = builder.Build();
@@ -21,14 +26,12 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
     IHttpClientFactory httpClientFactory,
     ILogger<Program> logger) =>
 {
-    // Chrome extension IDs are 32 lowercase letters (a-p)
-    if (!Regex.IsMatch(extensionId, "^[a-p]{32}$"))
+    if (!ExtensionIdRegex().IsMatch(extensionId))
     {
-        return Results.BadRequest(new
-        {
-            error = "Invalid extension ID format. Must be 32 lowercase letters (a-p).",
-            source = "chrome-extension-version-api"
-        });
+        return Results.Json(
+            new ErrorResponse("Invalid extension ID format. Must be 32 lowercase letters (a-p)."),
+            AppJsonContext.Default.ErrorResponse,
+            statusCode: 400);
     }
 
     var cacheKey = $"cws-version-{extensionId}";
@@ -36,12 +39,9 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
     if (cache.TryGetValue(cacheKey, out CachedVersion? cached))
     {
         logger.LogDebug("Cache hit for extension {ExtensionId}", extensionId);
-        return Results.Ok(new
-        {
-            version = cached!.Version,
-            cached = true,
-            checkedAt = cached.CheckedAt
-        });
+        return Results.Json(
+            new VersionResponse(cached!.Version, true, cached.CheckedAt),
+            AppJsonContext.Default.VersionResponse);
     }
 
     try
@@ -58,11 +58,10 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
         {
             logger.LogWarning("Could not extract version from Chrome Web Store page for extension {ExtensionId}",
                 extensionId);
-            return Results.NotFound(new
-            {
-                error = "Could not extract version from Chrome Web Store page.",
-                source = "chrome-extension-version-api"
-            });
+            return Results.Json(
+                new ErrorResponse("Could not extract version from Chrome Web Store page."),
+                AppJsonContext.Default.ErrorResponse,
+                statusCode: 404);
         }
 
         var result = new CachedVersion(version, DateTimeOffset.UtcNow);
@@ -70,59 +69,51 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
 
         logger.LogInformation("Extension {ExtensionId} version: {Version}", extensionId, version);
 
-        return Results.Ok(new
-        {
-            version,
-            cached = false,
-            checkedAt = result.CheckedAt
-        });
+        return Results.Json(
+            new VersionResponse(version, false, result.CheckedAt),
+            AppJsonContext.Default.VersionResponse);
     }
     catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.TooManyRequests)
     {
         logger.LogError(ex, "Rate limited by Chrome Web Store for extension {ExtensionId}", extensionId);
 
-        // Return 503 with a body that distinguishes from nginx 503
-        return Results.Json(new
-        {
-            error = "Rate limited by Chrome Web Store. Please try again later.",
-            source = "chrome-extension-version-api",
-            retryAfterSeconds = 300
-        }, statusCode: 503);
+        return Results.Json(
+            new ErrorResponse("Rate limited by Chrome Web Store. Please try again later.", RetryAfterSeconds: 300),
+            AppJsonContext.Default.ErrorResponse,
+            statusCode: 503);
     }
     catch (HttpRequestException ex)
     {
         logger.LogError(ex, "Failed to fetch Chrome Web Store page for extension {ExtensionId}", extensionId);
 
-        return Results.Json(new
-        {
-            error = "Failed to fetch Chrome Web Store page.",
-            source = "chrome-extension-version-api",
-            details = ex.Message
-        }, statusCode: 503);
+        return Results.Json(
+            new ErrorResponse("Failed to fetch Chrome Web Store page.", Details: ex.Message),
+            AppJsonContext.Default.ErrorResponse,
+            statusCode: 503);
     }
     catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
     {
         logger.LogError(ex, "Timeout fetching Chrome Web Store page for extension {ExtensionId}", extensionId);
 
-        return Results.Json(new
-        {
-            error = "Chrome Web Store request timed out.",
-            source = "chrome-extension-version-api"
-        }, statusCode: 503);
+        return Results.Json(
+            new ErrorResponse("Chrome Web Store request timed out."),
+            AppJsonContext.Default.ErrorResponse,
+            statusCode: 503);
     }
 });
 
-app.MapGet("/healthz", () => Results.Ok(new { status = "healthy" }));
+app.MapGet("/healthz", () => Results.Json(
+    new HealthResponse("healthy"),
+    AppJsonContext.Default.HealthResponse));
 
 app.Run();
 
 static string? ExtractVersion(string html)
 {
-    // Same logic as the GitHub Action: split on '>', find the first semver-like pattern
     var parts = html.Split('>');
     foreach (var part in parts)
     {
-        var match = Regex.Match(part, @"^(\d+\.\d+\.\d+)");
+        var match = VersionRegex().Match(part);
         if (match.Success)
             return match.Groups[1].Value;
     }
@@ -130,4 +121,29 @@ static string? ExtractVersion(string html)
     return null;
 }
 
+[GeneratedRegex(@"^[a-p]{32}$")]
+static partial Regex ExtensionIdRegex();
+
+[GeneratedRegex(@"^(\d+\.\d+\.\d+)")]
+static partial Regex VersionRegex();
+
+// --- Models ---
+
 record CachedVersion(string Version, DateTimeOffset CheckedAt);
+
+record VersionResponse(string Version, bool Cached, DateTimeOffset CheckedAt);
+
+record ErrorResponse(
+    string Error,
+    string Source = "chrome-extension-version-api",
+    string? Details = null,
+    int? RetryAfterSeconds = null);
+
+record HealthResponse(string Status);
+
+// --- AOT JSON serialization ---
+
+[JsonSerializable(typeof(VersionResponse))]
+[JsonSerializable(typeof(ErrorResponse))]
+[JsonSerializable(typeof(HealthResponse))]
+internal partial class AppJsonContext : JsonSerializerContext;
