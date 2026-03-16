@@ -4,6 +4,15 @@ using Microsoft.Extensions.Caching.Memory;
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient("ChromeWebStore", client =>
 {
@@ -17,6 +26,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var app = builder.Build();
+
+app.UseCors();
 
 var cacheTtl = TimeSpan.FromMinutes(app.Configuration.GetValue("CacheTtlMinutes", 5));
 
