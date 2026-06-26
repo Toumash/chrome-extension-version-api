@@ -1,6 +1,6 @@
 # Chrome Extension Version API
 
-Lightweight HTTP API that checks published Chrome extension versions from Chrome Web Store.
+Lightweight HTTP API that checks published Chrome extension versions from Chrome's update service.
 
 ## Endpoint
 
@@ -20,7 +20,7 @@ GET /check-published-extension-version/{extensionId}
 ### Error responses
 - **400** - Invalid extension ID format
 - **404** - Version could not be extracted
-- **503** - Chrome Web Store unreachable or rate limited (JSON body with `"source": "chrome-extension-version-api"` to distinguish from nginx 503)
+- **503** - Chrome update service unreachable or rate limited (JSON body with `"source": "chrome-extension-version-api"` to distinguish from nginx 503)
 
 ## Configuration
 

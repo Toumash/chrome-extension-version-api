@@ -8,4 +8,8 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="ChromeExtensionVersionApi.Tests/**" />
+  </ItemGroup>
+
 </Project>

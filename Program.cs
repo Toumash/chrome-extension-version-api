@@ -1,6 +1,11 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml;
+using System.Xml.Linq;
 using Microsoft.Extensions.Caching.Memory;
+
+[assembly: InternalsVisibleTo("ChromeExtensionVersionApi.TestRunner")]
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
@@ -14,10 +19,11 @@ builder.Services.AddCors(options =>
     });
 });
 builder.Services.AddMemoryCache();
-builder.Services.AddHttpClient("ChromeWebStore", client =>
+builder.Services.AddHttpClient("ChromeUpdateService", client =>
 {
     client.DefaultRequestHeaders.UserAgent.ParseAdd(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+    client.DefaultRequestHeaders.Accept.ParseAdd("text/xml");
     client.Timeout = TimeSpan.FromSeconds(15);
 });
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -57,20 +63,20 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
 
     try
     {
-        var client = httpClientFactory.CreateClient("ChromeWebStore");
-        var storeUrl = $"https://chromewebstore.google.com/detail/_/{extensionId}";
+        var client = httpClientFactory.CreateClient("ChromeUpdateService");
+        var updateUrl = ChromeUpdateService.BuildUpdateCheckUrl(extensionId);
 
-        logger.LogInformation("Fetching Chrome Web Store page for extension {ExtensionId}", extensionId);
-        var html = await client.GetStringAsync(storeUrl);
+        logger.LogInformation("Fetching Chrome update service response for extension {ExtensionId}", extensionId);
+        var response = await client.GetStringAsync(updateUrl);
 
-        var version = VersionExtractor.Extract(html);
+        var version = VersionExtractor.Extract(response, extensionId);
 
         if (string.IsNullOrEmpty(version))
         {
-            logger.LogWarning("Could not extract version from Chrome Web Store page for extension {ExtensionId}",
+            logger.LogWarning("Could not extract version from Chrome update service response for extension {ExtensionId}",
                 extensionId);
             return Results.Json(
-                new ErrorResponse("Could not extract version from Chrome Web Store page."),
+                new ErrorResponse("Could not extract version from Chrome update service response."),
                 AppJsonContext.Default.ErrorResponse,
                 statusCode: 404);
         }
@@ -86,28 +92,28 @@ app.MapGet("/check-published-extension-version/{extensionId}", async (
     }
     catch (HttpRequestException ex) when (ex.StatusCode is System.Net.HttpStatusCode.TooManyRequests)
     {
-        logger.LogError(ex, "Rate limited by Chrome Web Store for extension {ExtensionId}", extensionId);
+        logger.LogError(ex, "Rate limited by Chrome update service for extension {ExtensionId}", extensionId);
 
         return Results.Json(
-            new ErrorResponse("Rate limited by Chrome Web Store. Please try again later.", RetryAfterSeconds: 300),
+            new ErrorResponse("Rate limited by Chrome update service. Please try again later.", RetryAfterSeconds: 300),
             AppJsonContext.Default.ErrorResponse,
             statusCode: 503);
     }
     catch (HttpRequestException ex)
     {
-        logger.LogError(ex, "Failed to fetch Chrome Web Store page for extension {ExtensionId}", extensionId);
+        logger.LogError(ex, "Failed to fetch Chrome update service response for extension {ExtensionId}", extensionId);
 
         return Results.Json(
-            new ErrorResponse("Failed to fetch Chrome Web Store page.", Details: ex.Message),
+            new ErrorResponse("Failed to fetch Chrome update service response.", Details: ex.Message),
             AppJsonContext.Default.ErrorResponse,
             statusCode: 503);
     }
     catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
     {
-        logger.LogError(ex, "Timeout fetching Chrome Web Store page for extension {ExtensionId}", extensionId);
+        logger.LogError(ex, "Timeout fetching Chrome update service response for extension {ExtensionId}", extensionId);
 
         return Results.Json(
-            new ErrorResponse("Chrome Web Store request timed out."),
+            new ErrorResponse("Chrome update service request timed out."),
             AppJsonContext.Default.ErrorResponse,
             statusCode: 503);
     }
@@ -126,23 +132,55 @@ internal static partial class Patterns
     [GeneratedRegex(@"^[a-p]{32}$")]
     public static partial Regex ExtensionId();
 
-    [GeneratedRegex(@"^(\d+\.\d+\.\d+)")]
-    public static partial Regex Version();
+    [GeneratedRegex(@"^\d+(?:\.\d+){0,3}$")]
+    public static partial Regex ChromeVersion();
+}
+
+internal static class ChromeUpdateService
+{
+    private const string ProductVersion = "131.0.0.0";
+
+    public static string BuildUpdateCheckUrl(string extensionId)
+    {
+        var updateCheck = Uri.EscapeDataString($"id={extensionId}&installsource=ondemand&uc");
+        return "https://clients2.google.com/service/update2/crx" +
+            $"?response=updatecheck&prodversion={ProductVersion}&acceptformat=crx2,crx3&x={updateCheck}";
+    }
 }
 
 internal static class VersionExtractor
 {
-    public static string? Extract(string html)
-    {
-        var parts = html.Split('>');
-        foreach (var part in parts)
-        {
-            var match = Patterns.Version().Match(part);
-            if (match.Success)
-                return match.Groups[1].Value;
-        }
+    private static readonly XNamespace UpdateServiceNamespace = "http://www.google.com/update2/response";
 
-        return null;
+    public static string? Extract(string response, string extensionId)
+    {
+        try
+        {
+            var document = XDocument.Parse(response);
+            var app = document.Descendants(UpdateServiceNamespace + "app")
+                .FirstOrDefault(element =>
+                    string.Equals((string?)element.Attribute("appid"), extensionId, StringComparison.Ordinal));
+
+            if (app is null)
+                return null;
+
+            var updateCheck = app.Element(UpdateServiceNamespace + "updatecheck");
+            if (updateCheck is null ||
+                !string.Equals((string?)updateCheck.Attribute("status"), "ok", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return NormalizeVersion((string?)updateCheck.Attribute("version"));
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+    }
+
+    private static string? NormalizeVersion(string? version)
+    {
+        version = version?.Trim();
+        return !string.IsNullOrEmpty(version) && Patterns.ChromeVersion().IsMatch(version) ? version : null;
     }
 }
 
